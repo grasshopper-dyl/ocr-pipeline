@@ -25,28 +25,28 @@ log = logging.getLogger("ocr-worker")
 # ------------------------------------------------------------------
 # FASTAPI APP
 # ------------------------------------------------------------------
-app = FastAPI(title="docling-ocr-worker", version="2.0.0")
+app = FastAPI(title="docling-ocr-worker", version="1.0.0")
 
 
 # ------------------------------------------------------------------
 # PERF SETTINGS
 # ------------------------------------------------------------------
-PAGE_BATCH_SIZE = int(os.getenv("OCR_PAGE_BATCH_SIZE", "4"))
+PAGE_BATCH_SIZE = int(os.getenv("OCR_PAGE_BATCH_SIZE", "1"))  # single-page statements
 settings.perf.page_batch_size = PAGE_BATCH_SIZE
 settings.debug.profile_pipeline_timings = True
 
 
 # ------------------------------------------------------------------
-# DOC LING PDF PIPELINE (TESSERACT CLI OCR + TABLES)
+# DOC LING: PDF PIPELINE + TESSERACT CLI OCR (ENGLISH) — SINGLE PAGE
 # ------------------------------------------------------------------
-pipeline_options = PdfPipelineOptions()
-pipeline_options.do_ocr = True
-pipeline_options.do_table_structure = True
-pipeline_options.table_structure_options.do_cell_matching = True
+# Your setup, but forced to English:
+# - "eng" requires tesseract language data for English (usually installed by default).
+ocr_options = TesseractCliOcrOptions(lang=["eng"])
 
-# Force full-page OCR (best for statements / scans)
-pipeline_options.ocr_options = TesseractCliOcrOptions(
+pipeline_options = PdfPipelineOptions(
+    do_ocr=True,
     force_full_page_ocr=True,
+    ocr_options=ocr_options,
 )
 
 converter = DocumentConverter(
@@ -95,7 +95,7 @@ def extract_timings(conv_result) -> Dict[str, Any]:
     if hasattr(conv_result, "timings") and isinstance(conv_result.timings, dict):
         for k, v in conv_result.timings.items():
             if hasattr(v, "times"):
-                t = v.times
+                t = getattr(v, "times", None)
                 if isinstance(t, list) and t:
                     out[k] = {
                         "count": len(t),
@@ -117,12 +117,10 @@ def extract_timings(conv_result) -> Dict[str, Any]:
 def health():
     return {
         "ok": True,
-        "pipeline": "docling_pdf_tesseract_cli_tables",
+        "pipeline": "docling_pdf_tesseract_cli_eng",
         "page_batch_size": PAGE_BATCH_SIZE,
-        "ocr_engine": "tesseract_cli",
+        "ocr_lang": ["eng"],
         "force_full_page_ocr": True,
-        "table_structure": True,
-        "cell_matching": True,
     }
 
 
@@ -153,7 +151,7 @@ async def convert_ocr(file: UploadFile = File(...)):
             filename=filename,
             status=str(getattr(result, "status", "UNKNOWN")),
             num_pages=len(getattr(result, "pages", []) or []),
-            pipeline="docling_pdf_tesseract_cli_tables",
+            pipeline="docling_pdf_tesseract_cli_eng",
             timings=extract_timings(result),
             markdown=markdown,
             text=text,
@@ -171,5 +169,5 @@ async def convert_ocr(file: UploadFile = File(...)):
 if __name__ == "__main__":
     import uvicorn
 
-    log.info("Starting Docling OCR (Tesseract CLI + tables) on port %s", os.getenv("PORT", "8000"))
+    log.info("Starting Docling OCR (Tesseract CLI, eng) on port %s", os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
