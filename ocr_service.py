@@ -20,7 +20,7 @@ processor = AutoProcessor.from_pretrained("ibm-granite/granite-docling-258M")
 model = AutoModelForVision2Seq.from_pretrained(
     "ibm-granite/granite-docling-258M",
     torch_dtype=torch.bfloat16,
-    _attn_implementation="flash_attention_2" if DEVICE == "cuda" else "sdpa",
+    _attn_implementation="sdpa" if DEVICE == "cuda" else "sdpa",
 ).to(DEVICE)
 
 # Create input messages
