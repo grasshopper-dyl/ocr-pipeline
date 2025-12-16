@@ -25,25 +25,3 @@ converter = DocumentConverter(
 doc = converter.convert(source=source).document
 
 print(doc.export_to_markdown())
-
-
-###### USING MACOS MPS ACCELERATOR
-# Demonstrates using MLX on macOS with MPS acceleration (macOS only).
-# For more options see the `compare_vlm_models.py` example.
-
-pipeline_options = VlmPipelineOptions(
-    vlm_options=vlm_model_specs.GRANITEDOCLING_MLX,
-)
-
-converter = DocumentConverter(
-    format_options={
-        InputFormat.PDF: PdfFormatOption(
-            pipeline_cls=VlmPipeline,
-            pipeline_options=pipeline_options,
-        ),
-    }
-)
-
-doc = converter.convert(source=source).document
-
-print(doc.export_to_markdown())
