@@ -20,8 +20,7 @@ def main() -> None:
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = True
 
-    # OFF for readability (prevents the “everything in one table cell” output)
-    pipeline_options.do_table_structure = False
+    pipeline_options.do_table_structure = True
     pipeline_options.table_structure_options.do_cell_matching = False
 
     ocr_options = TesseractCliOcrOptions(force_full_page_ocr=True)
