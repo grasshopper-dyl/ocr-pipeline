@@ -1,37 +1,49 @@
-from pathlib import Path
 
+from docling.datamodel import vlm_model_specs
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
-    PdfPipelineOptions,
-    TesseractCliOcrOptions,
+    VlmPipelineOptions,
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.pipeline.vlm_pipeline import VlmPipeline
+
+# Convert a public arXiv PDF; replace with a local path if preferred.
+source = "https://arxiv.org/pdf/2501.17887"
+
+###### USING SIMPLE DEFAULT VALUES
+# - GraniteDocling model
+# - Using the transformers framework
+
+converter = DocumentConverter(
+    format_options={
+        InputFormat.PDF: PdfFormatOption(
+            pipeline_cls=VlmPipeline,
+        ),
+    }
+)
+
+doc = converter.convert(source=source).document
+
+print(doc.export_to_markdown())
 
 
-def main():
-    input_doc_path = Path("/app/data/in/ocr-inputs/statement_sample1.pdf")
+###### USING MACOS MPS ACCELERATOR
+# Demonstrates using MLX on macOS with MPS acceleration (macOS only).
+# For more options see the `compare_vlm_models.py` example.
 
-    pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_ocr = True
-    pipeline_options.do_table_structure = True
-    pipeline_options.table_structure_options.do_cell_matching = True
+pipeline_options = VlmPipelineOptions(
+    vlm_options=vlm_model_specs.GRANITEDOCLING_MLX,
+)
 
-    # OCR options
-    ocr_options = TesseractCliOcrOptions(force_full_page_ocr=True)
-    pipeline_options.ocr_options = ocr_options
+converter = DocumentConverter(
+    format_options={
+        InputFormat.PDF: PdfFormatOption(
+            pipeline_cls=VlmPipeline,
+            pipeline_options=pipeline_options,
+        ),
+    }
+)
 
-    converter = DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(
-                pipeline_options=pipeline_options,
-            )
-        }
-    )
+doc = converter.convert(source=source).document
 
-    doc = converter.convert(input_doc_path).document
-    md = doc.export_to_markdown()
-    print(md)
-
-
-if __name__ == "__main__":
-    main()
+print(doc.export_to_markdown())
