@@ -18,34 +18,18 @@ from docling.datamodel.settings import settings
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
-# ------------------------
-# LOGGING
-# ------------------------
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 _log = logging.getLogger("ocr-worker")
 
-# ------------------------
-# APP
-# ------------------------
 app = FastAPI(title="ocr-worker", version="0.1.0")
 
-# ------------------------
-# DOCling GRANITE 258 (REMOTE, OPENAI-COMPATIBLE)
-# ------------------------
-# vLLM default: localhost:8000
-# LM Studio default: localhost:1234
-OCR_HOSTPORT = os.getenv("OCR_HOSTPORT", "localhost:8000")
-
-# For vLLM use: ibm-granite/granite-docling-258M
-# For LM Studio MLX model name might be: granite-docling-258m-mlx
+# ---- Docling Granite 258 (remote OpenAI-compatible endpoint) ----
+OCR_HOSTPORT = os.getenv("OCR_HOSTPORT", "localhost:8000")  # vLLM default 8000
 OCR_MODEL = os.getenv("OCR_MODEL", "ibm-granite/granite-docling-258M")
-
 OCR_PROMPT = os.getenv("OCR_PROMPT", "Convert this page to docling.")
-OCR_FORMAT = ResponseFormat.DOCTAGS
-
+OCR_API_KEY = os.getenv("OCR_API_KEY", "")
 OCR_MAX_TOKENS = int(os.getenv("OCR_MAX_TOKENS", "4096"))
 OCR_TEMPERATURE = float(os.getenv("OCR_TEMPERATURE", "0.2"))
-OCR_API_KEY = os.getenv("OCR_API_KEY", "")
 OCR_SKIP_SPECIAL_TOKENS = os.getenv("OCR_SKIP_SPECIAL_TOKENS", "true").lower() == "true"
 
 PAGE_BATCH_SIZE = int(os.getenv("OCR_PAGE_BATCH_SIZE", "16"))
@@ -72,7 +56,7 @@ def openai_compatible_vlm_options(
         params=dict(
             model=model,
             max_tokens=max_tokens,
-            skip_special_tokens=skip_special_tokens,  # commonly needed for vLLM
+            skip_special_tokens=skip_special_tokens,
         ),
         headers=headers,
         prompt=prompt,
@@ -88,7 +72,7 @@ pipeline_options.vlm_options = openai_compatible_vlm_options(
     model=OCR_MODEL,
     hostname_and_port=OCR_HOSTPORT,
     prompt=OCR_PROMPT,
-    format=OCR_FORMAT,
+    format=ResponseFormat.DOCTAGS,
     api_key=OCR_API_KEY,
     temperature=OCR_TEMPERATURE,
     max_tokens=OCR_MAX_TOKENS,
@@ -104,9 +88,7 @@ converter_ocr = DocumentConverter(
     }
 )
 
-# ------------------------
-# RESPONSE MODEL
-# ------------------------
+
 class OcrResult(BaseModel):
     doc_id: str
     filename: str
@@ -119,9 +101,6 @@ class OcrResult(BaseModel):
     text: str
 
 
-# ------------------------
-# HELPERS
-# ------------------------
 _MONEY_RE = re.compile(r"\$\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?")
 _DATE_RE = re.compile(
     r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\b",
@@ -187,9 +166,6 @@ def _safe_timings(conv_result) -> Dict[str, Any]:
     return timings
 
 
-# ------------------------
-# ROUTES
-# ------------------------
 @app.get("/health")
 def health():
     return {
@@ -209,7 +185,6 @@ async def convert_ocr(file: UploadFile = File(...)):
 
     filename = file.filename or "upload.pdf"
     doc_id = _make_doc_id(filename, pdf_bytes)
-
     ds = DocumentStream(name=filename, stream=BytesIO(pdf_bytes))
 
     try:
@@ -242,12 +217,4 @@ async def convert_ocr(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-
-    _log.info(
-        "Starting OCR worker host=0.0.0.0 port=%s target=%s model=%s page_batch=%s",
-        os.getenv("PORT", "8000"),
-        OCR_HOSTPORT,
-        OCR_MODEL,
-        PAGE_BATCH_SIZE,
-    )
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
