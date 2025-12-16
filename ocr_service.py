@@ -3,8 +3,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import re
-import html
 from io import BytesIO
 from typing import Any, Dict
 
@@ -12,9 +10,9 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from docling.datamodel.base_models import DocumentStream, InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractCliOcrOptions
 from docling.datamodel.settings import settings
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.pipeline.vlm_pipeline import VlmPipeline
 
 
 # ------------------------------------------------------------------
@@ -27,11 +25,11 @@ log = logging.getLogger("ocr-worker")
 # ------------------------------------------------------------------
 # FASTAPI APP
 # ------------------------------------------------------------------
-app = FastAPI(title="docling-ocr-worker", version="1.0.1")
+app = FastAPI(title="docling-ocr-worker", version="2.0.0")
 
 
 # ------------------------------------------------------------------
-# PERFORMANCE / PIPELINE SETTINGS (LOCAL ONLY)
+# PERF SETTINGS
 # ------------------------------------------------------------------
 PAGE_BATCH_SIZE = int(os.getenv("OCR_PAGE_BATCH_SIZE", "4"))
 settings.perf.page_batch_size = PAGE_BATCH_SIZE
@@ -39,12 +37,22 @@ settings.debug.profile_pipeline_timings = True
 
 
 # ------------------------------------------------------------------
-# DOC LING LOCAL GRANITE VLM
+# DOC LING PDF PIPELINE (TESSERACT CLI OCR + TABLES)
 # ------------------------------------------------------------------
+pipeline_options = PdfPipelineOptions()
+pipeline_options.do_ocr = True
+pipeline_options.do_table_structure = True
+pipeline_options.table_structure_options.do_cell_matching = True
+
+# Force full-page OCR (best for statements / scans)
+pipeline_options.ocr_options = TesseractCliOcrOptions(
+    force_full_page_ocr=True,
+)
+
 converter = DocumentConverter(
     format_options={
         InputFormat.PDF: PdfFormatOption(
-            pipeline_cls=VlmPipeline,
+            pipeline_options=pipeline_options,
         )
     }
 )
@@ -62,88 +70,6 @@ class OcrResult(BaseModel):
     timings: Dict[str, Any]
     markdown: str
     text: str
-
-
-# ------------------------------------------------------------------
-# CLEANUP / NORMALIZATION
-# ------------------------------------------------------------------
-# Match:
-# - loc_499>
-# - loc_499&gt;
-# - loc\_499>
-# - loc\_499&gt;
-_LOC_TAG_RE = re.compile(r"\bloc\\?_?\d+(?:&gt;|>)", re.IGNORECASE)
-
-# Also remove the literal substring "loc_###" even if formatting is odd
-_LOC_BARE_RE = re.compile(r"\bloc\\?_?\d+\b", re.IGNORECASE)
-
-
-def clean_output(s: str) -> str:
-    """
-    Deterministic cleanup for layout-heavy docs like bank statements:
-    - HTML unescape
-    - remove loc artifacts
-    - normalize newlines
-    - collapse excessive repetition:
-        * consecutive duplicate cap
-        * global per-line cap (keeps 'Total Checks Paid' from exploding)
-    """
-    if not s:
-        return ""
-
-    # Decode HTML entities (&amp; → &, &gt; → >, etc.)
-    s = html.unescape(s)
-
-    # Remove loc artifacts
-    s = _LOC_TAG_RE.sub("", s)
-    s = _LOC_BARE_RE.sub("", s)
-
-    # Normalize newlines
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-
-    # Split and trim
-    raw_lines = [ln.strip() for ln in s.split("\n")]
-
-    cleaned: list[str] = []
-    prev: str | None = None
-    consecutive_run = 0
-
-    # Caps
-    MAX_CONSEC_REPEAT = int(os.getenv("OCR_MAX_REPEAT_SAME_LINE", "2"))   # consecutive
-    MAX_TOTAL_REPEAT = int(os.getenv("OCR_MAX_TOTAL_REPEAT_LINE", "3"))  # global per-line
-    total_counts: Dict[str, int] = {}
-
-    for ln in raw_lines:
-        if not ln:
-            # keep single blank lines only
-            if cleaned and cleaned[-1] != "":
-                cleaned.append("")
-            prev = ""
-            consecutive_run = 0
-            continue
-
-        # Global cap per identical line (prevents runaway loops)
-        c = total_counts.get(ln, 0)
-        if c >= MAX_TOTAL_REPEAT:
-            continue
-        total_counts[ln] = c + 1
-
-        # Consecutive cap (extra safety)
-        if ln == prev:
-            consecutive_run += 1
-            if consecutive_run >= MAX_CONSEC_REPEAT:
-                continue
-        else:
-            prev = ln
-            consecutive_run = 0
-
-        cleaned.append(ln)
-
-    # Trim trailing blank lines
-    while cleaned and cleaned[-1] == "":
-        cleaned.pop()
-
-    return "\n".join(cleaned).strip()
 
 
 # ------------------------------------------------------------------
@@ -191,11 +117,12 @@ def extract_timings(conv_result) -> Dict[str, Any]:
 def health():
     return {
         "ok": True,
-        "pipeline": "docling_granite_258_local",
+        "pipeline": "docling_pdf_tesseract_cli_tables",
         "page_batch_size": PAGE_BATCH_SIZE,
-        "backend": "transformers",
-        "max_consecutive_repeat": int(os.getenv("OCR_MAX_REPEAT_SAME_LINE", "2")),
-        "max_total_repeat_line": int(os.getenv("OCR_MAX_TOTAL_REPEAT_LINE", "3")),
+        "ocr_engine": "tesseract_cli",
+        "force_full_page_ocr": True,
+        "table_structure": True,
+        "cell_matching": True,
     }
 
 
@@ -207,10 +134,7 @@ async def convert_ocr(file: UploadFile = File(...)):
     filename = file.filename or "upload.pdf"
     doc_id = make_doc_id(filename, pdf_bytes)
 
-    stream = DocumentStream(
-        name=filename,
-        stream=BytesIO(pdf_bytes),
-    )
+    stream = DocumentStream(name=filename, stream=BytesIO(pdf_bytes))
 
     try:
         result = converter.convert(source=stream)
@@ -218,21 +142,18 @@ async def convert_ocr(file: UploadFile = File(...)):
         if not doc:
             raise RuntimeError("Docling returned no document")
 
-        raw_md = doc.export_to_markdown()
-        raw_text = doc.export_to_text() if hasattr(doc, "export_to_text") else raw_md
+        markdown = doc.export_to_markdown()
+        text = doc.export_to_text() if hasattr(doc, "export_to_text") else markdown
 
-        markdown = clean_output(raw_md)
-        text = clean_output(raw_text)
-
-        if not text:
-            raise HTTPException(status_code=502, detail="OCR produced empty output after cleanup")
+        if not (text or "").strip():
+            raise HTTPException(status_code=502, detail="OCR produced empty output")
 
         return OcrResult(
             doc_id=doc_id,
             filename=filename,
             status=str(getattr(result, "status", "UNKNOWN")),
             num_pages=len(getattr(result, "pages", []) or []),
-            pipeline="docling_granite_258_local",
+            pipeline="docling_pdf_tesseract_cli_tables",
             timings=extract_timings(result),
             markdown=markdown,
             text=text,
@@ -250,5 +171,5 @@ async def convert_ocr(file: UploadFile = File(...)):
 if __name__ == "__main__":
     import uvicorn
 
-    log.info("Starting Docling OCR (Granite-258 local) on port %s", os.getenv("PORT", "8000"))
+    log.info("Starting Docling OCR (Tesseract CLI + tables) on port %s", os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
