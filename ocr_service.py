@@ -14,14 +14,14 @@ def main() -> None:
 
     out_dir = Path("/app/logs")
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{input_doc_path.stem}.md"
+    out_path = out_dir / f"{input_doc_path.stem}.json"
 
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = True
 
     # Keep table structure ON, but prevent "everything becomes one cell"
-    pipeline_options.do_table_structure = False
-    pipeline_options.table_structure_options.do_cell_matching = False
+    pipeline_options.do_table_structure = True
+    pipeline_options.table_structure_options.do_cell_matching = True
 
     ocr_options = TesseractCliOcrOptions(force_full_page_ocr=True)
     ocr_options.lang = ["eng"]
@@ -34,11 +34,11 @@ def main() -> None:
     doc = converter.convert(input_doc_path).document
 
     # Docling-native: don't HTML-escape '&' into '&amp;'
-    md = doc.export_to_markdown(escape_html=False)
+    json = doc.export_to_json(escape_html=False)
 
-    out_path.write_text(md, encoding="utf-8")
-    print(f"Saved markdown to: {out_path}")
-    print(md)
+    out_path.write_text(json, encoding="utf-8")
+    print(f"Saved json to: {out_path}")
+    print(json)
 
 
 if __name__ == "__main__":
