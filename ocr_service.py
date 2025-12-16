@@ -9,12 +9,40 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractCliO
 from docling.document_converter import DocumentConverter, PdfFormatOption
 
 
-def docling_plain_text_lines(payload: Dict[str, Any]) -> str:
-    """
-    Convert Docling payload to readable plain text by reconstructing lines
-    from word-level OCR tokens using Y-position grouping.
-    """
+# ------------------------------------------------------------
+# Small cleanup: merge short adjacent lines (headers, labels)
+# ------------------------------------------------------------
+def merge_short_adjacent_lines(lines: List[str], max_len: int = 25) -> List[str]:
+    merged: List[str] = []
+    buffer = ""
 
+    for line in lines:
+        line = line.strip()
+        if not line:
+            if buffer:
+                merged.append(buffer)
+                buffer = ""
+            merged.append("")
+            continue
+
+        if len(line) <= max_len:
+            buffer = f"{buffer} {line}".strip() if buffer else line
+        else:
+            if buffer:
+                merged.append(buffer)
+                buffer = ""
+            merged.append(line)
+
+    if buffer:
+        merged.append(buffer)
+
+    return merged
+
+
+# ------------------------------------------------------------
+# Core: reconstruct readable lines from OCR word tokens
+# ------------------------------------------------------------
+def docling_plain_text_lines(payload: Dict[str, Any]) -> str:
     texts = payload.get("texts", [])
     if not texts:
         return ""
@@ -47,7 +75,6 @@ def docling_plain_text_lines(payload: Dict[str, Any]) -> str:
     # Sort: page → top-to-bottom → left-to-right
     tokens.sort(key=lambda x: (x[0], -x[1], x[2]))
 
-    # Median token height → line tolerance
     heights.sort()
     med_h = heights[len(heights) // 2] if heights else 10.0
     y_tol = max(2.0, med_h * 0.6)
@@ -84,9 +111,15 @@ def docling_plain_text_lines(payload: Dict[str, Any]) -> str:
     if current_line:
         lines.append(" ".join(current_line))
 
+    # 🔹 Small quality improvement
+    lines = merge_short_adjacent_lines(lines)
+
     return "\n".join(lines).strip() + "\n"
 
 
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
 def main() -> None:
     input_pdf = Path("/app/data/in/ocr-inputs/statement_sample1.pdf")
     if not input_pdf.exists():
@@ -95,13 +128,11 @@ def main() -> None:
     out_dir = Path("/app/logs")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # -------------------------
     # Docling configuration
-    # -------------------------
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = True
 
-    # IMPORTANT: keep table reconstruction OFF
+    # IMPORTANT: table reconstruction OFF for clean text
     pipeline_options.do_table_structure = False
 
     ocr_options = TesseractCliOcrOptions(force_full_page_ocr=True)
@@ -118,7 +149,7 @@ def main() -> None:
     doc = converter.convert(input_pdf).document
     payload = doc.export_to_dict()
 
-    # Save raw JSON (debug / provenance)
+    # Save raw JSON for provenance/debugging
     json_path = out_dir / f"{input_pdf.stem}.json"
     json_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False),
