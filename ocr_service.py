@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import html
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractCliOcrOptions
@@ -20,6 +19,7 @@ def main() -> None:
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = True
 
+    # Keep table structure ON, but prevent "everything becomes one cell"
     pipeline_options.do_table_structure = True
     pipeline_options.table_structure_options.do_cell_matching = False
 
@@ -32,7 +32,9 @@ def main() -> None:
     )
 
     doc = converter.convert(input_doc_path).document
-    md = html.unescape(doc.export_to_markdown())
+
+    # Docling-native: don't HTML-escape '&' into '&amp;'
+    md = doc.export_to_markdown(escape_html=False)
 
     out_path.write_text(md, encoding="utf-8")
     print(f"Saved markdown to: {out_path}")
