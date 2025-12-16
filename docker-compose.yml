@@ -1,16 +1,23 @@
-
 services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    command: >
+      --model ibm-granite/granite-docling-258M
+      --port 8000
+      --max-model-len 4096
+    ports:
+      - "8001:8000"
+
   ocr-service:
     build: .
     container_name: ocr-service
     runtime: nvidia
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - PYTHONUNBUFFERED=1
+      - OCR_HOSTPORT=vllm:8000
+      - OCR_TIMEOUT=240
     ports:
       - "8000:8000"
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    restart: no
