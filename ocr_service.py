@@ -1,67 +1,77 @@
 # Prerequisites:
-# pip install torch
+# pip install vllm
 # pip install docling_core
-# pip install transformers
+# place page images you want to convert into "img/" dir
 
-import torch
+import time
+import os
+from vllm import LLM, SamplingParams
+from transformers import AutoProcessor
+from PIL import Image
 from docling_core.types.doc import DoclingDocument
 from docling_core.types.doc.document import DocTagsDocument
-from transformers import AutoProcessor, AutoModelForVision2Seq
-from transformers.image_utils import load_image
 from pathlib import Path
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Configuration
+MODEL_PATH = "ibm-granite/granite-docling-258M"
+IMAGE_DIR = "pdf/"  # Place your page images here
+OUTPUT_DIR = "out/"
+PROMPT_TEXT = "Convert this page to docling."
 
-# Load images
-image = load_image("https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png")
-
-# Initialize processor and model
-processor = AutoProcessor.from_pretrained("ibm-granite/granite-docling-258M")
-model = AutoModelForVision2Seq.from_pretrained(
-    "ibm-granite/granite-docling-258M",
-    torch_dtype=torch.bfloat16,
-    _attn_implementation="sdpa" if DEVICE == "cuda" else "sdpa",
-).to(DEVICE)
-
-# Create input messages
 messages = [
     {
         "role": "user",
         "content": [
             {"type": "image"},
-            {"type": "text", "text": "Convert this page to docling."}
-        ]
+            {"type": "text", "text": PROMPT_TEXT},
+        ],
     },
 ]
 
-# Prepare inputs
-prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
-inputs = processor(text=prompt, images=[image], return_tensors="pt")
-inputs = inputs.to(DEVICE)
 
-# Generate outputs
-generated_ids = model.generate(**inputs, max_new_tokens=8192)
-prompt_length = inputs.input_ids.shape[1]
-trimmed_generated_ids = generated_ids[:, prompt_length:]
-doctags = processor.batch_decode(
-    trimmed_generated_ids,
+# Ensure output directory exists
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Initialize LLM
+llm = LLM(model=MODEL_PATH, revision="untied", limit_mm_per_prompt={"image": 1})
+processor = AutoProcessor.from_pretrained(MODEL_PATH)
+
+sampling_params = SamplingParams(
+    temperature=0.0,
+    max_tokens=8192,
     skip_special_tokens=False,
-)[0].lstrip()
+)
 
-print(f"DocTags: \n{doctags}\n")
+# Load and prepare all images and prompts up front
+batched_inputs = []
+image_names = []
 
+for img_file in sorted(os.listdir(IMAGE_DIR)):
+    if img_file.lower().endswith((".png", ".jpg", ".jpeg")):
+        img_path = os.path.join(IMAGE_DIR, img_file)
+        with Image.open(img_path) as im:
+            image = im.convert("RGB")
 
-# Populate document
-doctags_doc = DocTagsDocument.from_doctags_and_image_pairs([doctags], [image])
-# create a docling document
-doc = DoclingDocument.load_from_doctags(doctags_doc, document_name="Document")
-print(f"Markdown:\n{doc.export_to_markdown()}\n")
+        prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
+        batched_inputs.append({"prompt": prompt, "multi_modal_data": {"image": image}})
+        image_names.append(os.path.splitext(img_file)[0])
 
-## export as any format.
-# Path("out/").mkdir(parents=True, exist_ok=True)
-# HTML:
-# output_path_html = Path("out/") / "example.html"
-# doc.save_as_html(output_path_html)
-# Markdown:
-# output_path_md = Path("out/") / "example.md"
-# doc.save_as_markdown(output_path_md)
+# Run batch inference
+start_time = time.time()
+outputs = llm.generate(batched_inputs, sampling_params=sampling_params)
+
+# Postprocess all results
+for img_fn, output, input_data in zip(image_names, outputs, batched_inputs):
+    doctags = output.outputs[0].text
+    output_path_dt = Path(OUTPUT_DIR) / f"{img_fn}.dt"
+    output_path_md = Path(OUTPUT_DIR) / f"{img_fn}.md"
+
+    with open(output_path_dt, "w", encoding="utf-8") as f:
+        f.write(doctags)
+
+    # Convert to DoclingDocument and save markdown
+    doctags_doc = DocTagsDocument.from_doctags_and_image_pairs([doctags], [input_data["multi_modal_data"]["image"]])
+    doc = DoclingDocument.load_from_doctags(doctags_doc, document_name="Document")
+    doc.save_as_markdown(output_path_md)
+
+print(f"Total time: {time.time() - start_time:.2f} sec")
