@@ -1,4 +1,7 @@
-
+# Prerequisites:
+# pip install torch
+# pip install docling_core
+# pip install transformers
 
 import torch
 from docling_core.types.doc import DoclingDocument
