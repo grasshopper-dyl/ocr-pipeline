@@ -1,4 +1,3 @@
 torch
 docling-core
 transformers
-vllm
