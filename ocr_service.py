@@ -34,11 +34,11 @@ def main() -> None:
     doc = converter.convert(input_doc_path).document
 
     # Docling-native: don't HTML-escape '&' into '&amp;'
-    json = doc.export_to_json(escape_html=False)
+    dict = doc.export_to_dict(escape_html=False)
 
-    out_path.write_text(json, encoding="utf-8")
-    print(f"Saved json to: {out_path}")
-    print(json)
+    out_path.write_text(dict, encoding="utf-8")
+    print(f"Saved dict to: {out_path}")
+    print(dict)
 
 
 if __name__ == "__main__":
