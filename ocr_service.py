@@ -10,7 +10,7 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 
 
 def main():
-    input_doc_path = Path("/home/aiadmin/code/ocr-service/data/in/ocr-inputs/statement_sample1.pdf")
+    input_doc_path = Path("/app/data/in/ocr-inputs/statement_sample1.pdf")
 
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = True
