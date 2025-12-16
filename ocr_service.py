@@ -18,25 +18,17 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{input_doc_path.stem}.md"
 
-    # ----------------------------
-    # Docling PDF pipeline options
-    # ----------------------------
     pipeline_options = PdfPipelineOptions()
-
-    # Always OCR (image-only or mixed PDFs)
     pipeline_options.do_ocr = True
 
-    # Enable table structure detection
+    # turn OFF table extraction for readability
     pipeline_options.do_table_structure = False
     pipeline_options.table_structure_options.do_cell_matching = False
 
-    # Tesseract CLI OCR (SYSTEM BINARY REQUIRED)
     ocr_options = TesseractCliOcrOptions(force_full_page_ocr=True)
-
-    # IMPORTANT: must be list[str], not string
     ocr_options.lang = ["eng"]
-
     pipeline_options.ocr_options = ocr_options
+
 
     # ----------------------------
     # Converter
