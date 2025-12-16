@@ -2,3 +2,4 @@ torch
 docling-core
 docling[all]
 transformers
+fastapi
