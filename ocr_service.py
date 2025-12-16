@@ -6,8 +6,7 @@ import os
 import re
 import html
 from io import BytesIO
-from typing import Any, Dict, Optional
-from collections import deque
+from typing import Any, Dict
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -28,7 +27,7 @@ log = logging.getLogger("ocr-worker")
 # ------------------------------------------------------------------
 # FASTAPI APP
 # ------------------------------------------------------------------
-app = FastAPI(title="docling-ocr-worker", version="1.0.0")
+app = FastAPI(title="docling-ocr-worker", version="1.0.1")
 
 
 # ------------------------------------------------------------------
@@ -42,8 +41,6 @@ settings.debug.profile_pipeline_timings = True
 # ------------------------------------------------------------------
 # DOC LING LOCAL GRANITE VLM
 # ------------------------------------------------------------------
-# This uses the default local transformers backend for Granite-Docling-258M.
-# No ApiVlmOptions, no remote services, no HTTP calls.
 converter = DocumentConverter(
     format_options={
         InputFormat.PDF: PdfFormatOption(
@@ -70,45 +67,79 @@ class OcrResult(BaseModel):
 # ------------------------------------------------------------------
 # CLEANUP / NORMALIZATION
 # ------------------------------------------------------------------
-_LOC_TAG_RE = re.compile(r"\bloc_\d+&gt;|\bloc_\d+>", re.IGNORECASE)
+# Match:
+# - loc_499>
+# - loc_499&gt;
+# - loc\_499>
+# - loc\_499&gt;
+_LOC_TAG_RE = re.compile(r"\bloc\\?_?\d+(?:&gt;|>)", re.IGNORECASE)
 
-def clean_output(text: str) -> str:
-    if not text:
+# Also remove the literal substring "loc_###" even if formatting is odd
+_LOC_BARE_RE = re.compile(r"\bloc\\?_?\d+\b", re.IGNORECASE)
+
+
+def clean_output(s: str) -> str:
+    """
+    Deterministic cleanup for layout-heavy docs like bank statements:
+    - HTML unescape
+    - remove loc artifacts
+    - normalize newlines
+    - collapse excessive repetition:
+        * consecutive duplicate cap
+        * global per-line cap (keeps 'Total Checks Paid' from exploding)
+    """
+    if not s:
         return ""
 
-    # Decode HTML entities (&amp; → &, etc.)
-    text = html.unescape(text)
+    # Decode HTML entities (&amp; → &, &gt; → >, etc.)
+    s = html.unescape(s)
 
-    # Remove Docling locator artifacts
-    text = _LOC_TAG_RE.sub("", text)
+    # Remove loc artifacts
+    s = _LOC_TAG_RE.sub("", s)
+    s = _LOC_BARE_RE.sub("", s)
 
     # Normalize newlines
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
 
-    lines = [ln.strip() for ln in text.split("\n")]
-    cleaned = []
+    # Split and trim
+    raw_lines = [ln.strip() for ln in s.split("\n")]
 
-    prev = None
-    repeat_count = 0
-    MAX_REPEAT = int(os.getenv("OCR_MAX_REPEAT_SAME_LINE", "3"))
+    cleaned: list[str] = []
+    prev: str | None = None
+    consecutive_run = 0
 
-    for ln in lines:
+    # Caps
+    MAX_CONSEC_REPEAT = int(os.getenv("OCR_MAX_REPEAT_SAME_LINE", "2"))   # consecutive
+    MAX_TOTAL_REPEAT = int(os.getenv("OCR_MAX_TOTAL_REPEAT_LINE", "3"))  # global per-line
+    total_counts: Dict[str, int] = {}
+
+    for ln in raw_lines:
         if not ln:
+            # keep single blank lines only
             if cleaned and cleaned[-1] != "":
                 cleaned.append("")
             prev = ""
-            repeat_count = 0
+            consecutive_run = 0
             continue
 
+        # Global cap per identical line (prevents runaway loops)
+        c = total_counts.get(ln, 0)
+        if c >= MAX_TOTAL_REPEAT:
+            continue
+        total_counts[ln] = c + 1
+
+        # Consecutive cap (extra safety)
         if ln == prev:
-            repeat_count += 1
-            if repeat_count < MAX_REPEAT:
-                cleaned.append(ln)
+            consecutive_run += 1
+            if consecutive_run >= MAX_CONSEC_REPEAT:
+                continue
         else:
             prev = ln
-            repeat_count = 0
-            cleaned.append(ln)
+            consecutive_run = 0
 
+        cleaned.append(ln)
+
+    # Trim trailing blank lines
     while cleaned and cleaned[-1] == "":
         cleaned.pop()
 
@@ -163,6 +194,8 @@ def health():
         "pipeline": "docling_granite_258_local",
         "page_batch_size": PAGE_BATCH_SIZE,
         "backend": "transformers",
+        "max_consecutive_repeat": int(os.getenv("OCR_MAX_REPEAT_SAME_LINE", "2")),
+        "max_total_repeat_line": int(os.getenv("OCR_MAX_TOTAL_REPEAT_LINE", "3")),
     }
 
 
@@ -182,7 +215,6 @@ async def convert_ocr(file: UploadFile = File(...)):
     try:
         result = converter.convert(source=stream)
         doc = result.document
-
         if not doc:
             raise RuntimeError("Docling returned no document")
 
@@ -193,10 +225,7 @@ async def convert_ocr(file: UploadFile = File(...)):
         text = clean_output(raw_text)
 
         if not text:
-            raise HTTPException(
-                status_code=502,
-                detail="OCR produced empty output after cleanup",
-            )
+            raise HTTPException(status_code=502, detail="OCR produced empty output after cleanup")
 
         return OcrResult(
             doc_id=doc_id,
@@ -212,10 +241,7 @@ async def convert_ocr(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"OCR failure: {type(e).__name__}: {e}",
-        )
+        raise HTTPException(status_code=500, detail=f"OCR failure: {type(e).__name__}: {e}")
 
 
 # ------------------------------------------------------------------
@@ -224,8 +250,5 @@ async def convert_ocr(file: UploadFile = File(...)):
 if __name__ == "__main__":
     import uvicorn
 
-    log.info(
-        "Starting Docling OCR (Granite-258 local) on port %s",
-        os.getenv("PORT", "8000"),
-    )
+    log.info("Starting Docling OCR (Granite-258 local) on port %s", os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
