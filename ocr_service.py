@@ -8,45 +8,56 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 
 
 def main() -> None:
-    # Input (inside container; mapped from ./data -> /app/data by docker-compose)
+    # PDF input (mounted from host: ./data -> /app/data)
     input_doc_path = Path("/app/data/in/ocr-inputs/statement_sample1.pdf")
     if not input_doc_path.exists():
-        raise FileNotFoundError(f"Input PDF not found: {input_doc_path}")
+        raise FileNotFoundError(f"PDF not found: {input_doc_path}")
 
-    # Output (inside container; mapped from ./logs -> /app/logs by docker-compose)
+    # Output markdown (mounted from host: ./logs -> /app/logs)
     out_dir = Path("/app/logs")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{input_doc_path.stem}.md"
 
+    # ----------------------------
+    # Docling PDF pipeline options
+    # ----------------------------
     pipeline_options = PdfPipelineOptions()
 
-    # NOTE: If your PDFs usually have a text layer, consider setting this False and only
-    # enabling OCR for scanned docs. For now we keep it True as you requested.
+    # Always OCR (image-only or mixed PDFs)
     pipeline_options.do_ocr = True
 
-    # Tables (requires OpenCV + libGL in the image)
+    # Enable table structure detection
     pipeline_options.do_table_structure = True
     pipeline_options.table_structure_options.do_cell_matching = True
 
-    # Use Tesseract CLI OCR (requires 'tesseract' binary installed in the image)
-    # Keep lang tight for bank statements to improve accuracy and speed.
+    # Tesseract CLI OCR (SYSTEM BINARY REQUIRED)
     ocr_options = TesseractCliOcrOptions(force_full_page_ocr=True)
-    ocr_options.lang = "eng"
+
+    # IMPORTANT: must be list[str], not string
+    ocr_options.lang = ["eng"]
+
     pipeline_options.ocr_options = ocr_options
 
+    # ----------------------------
+    # Converter
+    # ----------------------------
     converter = DocumentConverter(
         format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=pipeline_options
+            )
         }
     )
 
+    # Convert PDF → Docling document
     doc = converter.convert(input_doc_path).document
+
+    # Export to Markdown
     md = doc.export_to_markdown()
 
-    # Save to the mounted logs folder so it appears on the host at ./logs/<name>.md
+    # Write output to disk (host ./logs/)
     out_path.write_text(md, encoding="utf-8")
 
-    # Still print to docker logs for quick inspection
     print(f"Saved markdown to: {out_path}")
     print(md)
 
