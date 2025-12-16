@@ -126,7 +126,7 @@ def main() -> None:
     # Docling pipeline
     pipeline = PdfPipelineOptions()
     pipeline.do_ocr = True
-    pipeline.do_table_structure = True  # <-- ENABLE REAL TABLE PARSING
+    pipeline.do_table_structure = False  # <-- ENABLE REAL TABLE PARSING
 
     ocr = TesseractCliOcrOptions(force_full_page_ocr=True)
     ocr.lang = ["eng"]
