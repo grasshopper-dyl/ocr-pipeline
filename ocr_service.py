@@ -1,128 +1,174 @@
 from __future__ import annotations
 
-from pathlib import Path
-import json
-from typing import Any, Dict, List, Tuple
-
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractCliOcrOptions
-from docling.document_converter import DocumentConverter, PdfFormatOption
+from typing import Any, Dict, List, Tuple, Optional
+import re
 
 
-def _prov_key(prov: Dict[str, Any]) -> Tuple[int, float, float]:
-    """
-    Sort key: (page_no, -top_y, left_x)
-
-    Docling bbox uses coord_origin = BOTTOMLEFT, so larger 't' means higher on the page.
-    """
-    page_no = int(prov.get("page_no", 0))
+def _bbox_from_prov(prov: Dict[str, Any]) -> Optional[Dict[str, float]]:
     bbox = prov.get("bbox") or {}
-    t = float(bbox.get("t", 0.0))
-    l = float(bbox.get("l", 0.0))
-    return (page_no, -t, l)
+    try:
+        l = float(bbox.get("l", 0.0))
+        r = float(bbox.get("r", 0.0))
+        b = float(bbox.get("b", 0.0))
+        t = float(bbox.get("t", 0.0))
+    except (TypeError, ValueError):
+        return None
+    # basic sanity
+    if (r - l) <= 0 or (t - b) <= 0:
+        return None
+    return {"l": l, "r": r, "b": b, "t": t}
+
+
+def _is_junk_token(s: str) -> bool:
+    s = s.strip()
+    if not s:
+        return True
+
+    # Drop markdown table artifacts (should be rare in dict mode)
+    if s.startswith("|") and s.endswith("|"):
+        return True
+
+    # Drop single-char punctuation junk (keeps "s" and "5" etc.)
+    if len(s) == 1 and not s.isalnum():
+        return True
+
+    return False
+
+
+def _median(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    vs = sorted(values)
+    mid = len(vs) // 2
+    if len(vs) % 2 == 1:
+        return vs[mid]
+    return (vs[mid - 1] + vs[mid]) / 2.0
 
 
 def docling_dict_to_plain_text(payload: Dict[str, Any]) -> str:
     """
-    Build a plain-text stream from Docling's 'texts' list, ordered by provenance.
-    Avoids Docling's markdown/table serializer entirely.
+    Build plain text by reconstructing lines from Docling 'texts' using bbox geometry.
+    Assumes coord_origin = BOTTOMLEFT (Docling default), so higher on page => larger 't'.
     """
     texts: List[Dict[str, Any]] = payload.get("texts", []) or []
 
-    extracted: List[Tuple[Tuple[int, float, float], str]] = []
+    # Collect tokens
+    # token: (page_no, y_center, x_left, height, text)
+    tokens: List[Tuple[int, float, float, float, str]] = []
+    heights: List[float] = []
 
     for t in texts:
         s = (t.get("text") or "").strip()
-        if not s:
-            continue
-
-        # Many table renderings end up as '|' lines in markdown/text serializers.
-        # In the dict, most real OCR words won't start with '|', so we can drop these safely.
-        # (No regex; just a simple guard.)
-        if s.startswith("|") and s.endswith("|"):
+        if _is_junk_token(s):
             continue
 
         prov_list = t.get("prov") or []
-        if prov_list:
-            key = _prov_key(prov_list[0])
+        if not prov_list:
+            # If no provenance, skip; you can also append at end if you want.
+            continue
+
+        prov0 = prov_list[0]
+        page_no = int(prov0.get("page_no", 0))
+
+        bbox = _bbox_from_prov(prov0)
+        if not bbox:
+            continue
+
+        y_center = (bbox["t"] + bbox["b"]) / 2.0
+        x_left = bbox["l"]
+        height = (bbox["t"] - bbox["b"])
+
+        tokens.append((page_no, y_center, x_left, height, s))
+        heights.append(height)
+
+    if not tokens:
+        return ""
+
+    # Sort tokens: page asc, y desc (top->bottom), x asc (left->right)
+    tokens.sort(key=lambda z: (z[0], -z[1], z[2]))
+
+    # Adaptive tolerances based on token height
+    med_h = _median(heights)
+    # y tolerance for same line (tweakable)
+    y_tol = max(2.0, med_h * 0.60)
+    # vertical gap that triggers a blank line (tweakable)
+    gap_tol = max(6.0, med_h * 1.80)
+
+    lines_out: List[str] = []
+    current_page: Optional[int] = None
+
+    # Line accumulator
+    line_tokens: List[Tuple[float, str]] = []  # (x, text)
+    line_y: Optional[float] = None
+    last_line_y: Optional[float] = None
+
+    def flush_line():
+        nonlocal line_tokens, line_y, last_line_y
+
+        if not line_tokens:
+            line_y = None
+            return
+
+        # Order tokens in the line by x (already mostly sorted, but safe)
+        line_tokens.sort(key=lambda p: p[0])
+        line_text = " ".join(tok for _, tok in line_tokens)
+
+        # Clean up spacing around punctuation a tiny bit (safe-ish)
+        line_text = re.sub(r"\s+([,.;:])", r"\1", line_text)
+        line_text = re.sub(r"\(\s+", "(", line_text)
+        line_text = re.sub(r"\s+\)", ")", line_text)
+
+        # Paragraph-ish separation: if the vertical jump is large, add a blank line
+        if last_line_y is not None and line_y is not None:
+            if (last_line_y - line_y) > gap_tol:
+                if lines_out and lines_out[-1].strip() != "":
+                    lines_out.append("")
+
+        lines_out.append(line_text)
+
+        last_line_y = line_y
+        line_tokens = []
+        line_y = None
+
+    for page_no, y, x, _h, s in tokens:
+        # Page break handling
+        if current_page is None:
+            current_page = page_no
+        elif page_no != current_page:
+            flush_line()
+            lines_out.append("")
+            lines_out.append(f"--- PAGE {page_no} ---")
+            lines_out.append("")
+            current_page = page_no
+            last_line_y = None  # reset paragraph gap logic per page
+
+        if line_y is None:
+            # start new line
+            line_y = y
+            line_tokens.append((x, s))
+            continue
+
+        # Same line if y is close enough
+        if abs(y - line_y) <= y_tol:
+            line_tokens.append((x, s))
         else:
-            # If no prov, put at end
-            key = (999999, 0.0, 0.0)
+            # flush current line, start new
+            flush_line()
+            line_y = y
+            line_tokens.append((x, s))
 
-        extracted.append((key, s))
-
-    extracted.sort(key=lambda x: x[0])
-
-    # Simple paragraph-ish join: one item per line, collapse excessive blanks later.
-    lines: List[str] = []
-    prev_page = None
-    for (page_no, _, _), s in extracted:
-        if prev_page is None:
-            prev_page = page_no
-        elif page_no != prev_page:
-            lines.append("")  # page break
-            lines.append(f"--- PAGE {page_no} ---")
-            lines.append("")
-            prev_page = page_no
-
-        # Minimal entity cleanup without html module
-        s = s.replace("&amp;", "&")
-        lines.append(s)
+    flush_line()
 
     # Collapse repeated blank lines
-    out: List[str] = []
+    final: List[str] = []
     blank = False
-    for line in lines:
-        if line.strip() == "":
+    for ln in lines_out:
+        if ln.strip() == "":
             if not blank:
-                out.append("")
+                final.append("")
             blank = True
         else:
-            out.append(line)
+            final.append(ln)
             blank = False
 
-    return "\n".join(out).strip() + "\n"
-
-
-def main() -> None:
-    input_doc_path = Path("/app/data/in/ocr-inputs/statement_sample1.pdf")
-    if not input_doc_path.exists():
-        raise FileNotFoundError(f"PDF not found: {input_doc_path}")
-
-    out_dir = Path("/app/logs")
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_ocr = True
-
-    # For chunking: keep table structure OFF so nothing gets "consumed" into table objects
-    pipeline_options.do_table_structure = False
-    pipeline_options.table_structure_options.do_cell_matching = False
-
-    ocr_options = TesseractCliOcrOptions(force_full_page_ocr=True)
-    ocr_options.lang = ["eng"]
-    pipeline_options.ocr_options = ocr_options
-
-    converter = DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
-    )
-
-    doc = converter.convert(input_doc_path).document
-    payload = doc.export_to_dict()
-
-    # Optional: keep JSON for debugging/provenance
-    (out_dir / f"{input_doc_path.stem}.json").write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    txt = docling_dict_to_plain_text(payload)
-    txt_path = out_dir / f"{input_doc_path.stem}.txt"
-    txt_path.write_text(txt, encoding="utf-8")
-
-    print(f"Saved plain text to: {txt_path}")
-    print(txt)
-
-
-if __name__ == "__main__":
-    main()
+    return "\n".join(final).strip() + "\n"
