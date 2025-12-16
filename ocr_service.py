@@ -8,7 +8,7 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
 # Convert a public arXiv PDF; replace with a local path if preferred.
-source = "https://arxiv.org/pdf/2501.17887"
+source = "/app/data/in/ocr-inputs/statement_sample1.pdf"
 
 ###### USING SIMPLE DEFAULT VALUES
 # - GraniteDocling model
