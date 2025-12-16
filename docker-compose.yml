@@ -1,16 +1,4 @@
 services:
-  vllm:
-    image: vllm/vllm-openai:latest
-    container_name: vllm
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-    command: >
-      --model ibm-granite/granite-docling-258M
-      --port 8000
-      --max-model-len 4096
-    ports:
-      - "8001:8000"
 
   ocr-service:
     build: .
