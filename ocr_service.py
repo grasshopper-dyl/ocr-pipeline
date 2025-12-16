@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractCliOcrOptions
@@ -19,7 +20,8 @@ def main() -> None:
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = True
 
-    # Keep table structure ON, but prevent "everything becomes one cell"
+    # NOTE: If you turn this on and it "cuts out" text, that's table reconstruction
+    # consuming text blocks. Keep it off unless you specifically need tables.
     pipeline_options.do_table_structure = True
     pipeline_options.table_structure_options.do_cell_matching = True
 
@@ -33,12 +35,15 @@ def main() -> None:
 
     doc = converter.convert(input_doc_path).document
 
-    # Docling-native: don't HTML-escape '&' into '&amp;'
-    json = doc.export_to_json()
+    # Docling returns a Python dict (Docling-native)
+    payload = doc.export_to_dict()
 
-    out_path.write_text(json, encoding="utf-8")
+    # Write as JSON
+    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
     print(f"Saved json to: {out_path}")
-    print(json)
+    # Optional: print only a small preview so docker logs don't explode
+    print(json.dumps(payload, indent=2, ensure_ascii=False)[:2000])
 
 
 if __name__ == "__main__":
