@@ -4,3 +4,4 @@ docling[all]
 transformers
 fastapi
 python-multipart
+uvicorn[standard]
