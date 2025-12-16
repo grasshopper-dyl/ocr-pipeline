@@ -2,4 +2,3 @@ torch
 docling-core
 docling[all]
 transformers
-tesseract
