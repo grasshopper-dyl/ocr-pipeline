@@ -27,8 +27,8 @@ def main() -> None:
     pipeline_options.do_ocr = True
 
     # Enable table structure detection
-    pipeline_options.do_table_structure = True
-    pipeline_options.table_structure_options.do_cell_matching = True
+    pipeline_options.do_table_structure = False
+    pipeline_options.table_structure_options.do_cell_matching = False
 
     # Tesseract CLI OCR (SYSTEM BINARY REQUIRED)
     ocr_options = TesseractCliOcrOptions(force_full_page_ocr=True)
