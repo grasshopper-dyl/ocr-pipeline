@@ -33,7 +33,7 @@ BATCH_SIZE = 16
 settings.perf.page_batch_size = BATCH_SIZE
 settings.debug.profile_pipeline_timings = True  # POC: include timings if available
 
-vlm_opts = vlm_model_specs.GRANITEDOCLING_VLLM_API
+vlm_opts = vlm_model_specs.GRANITEDOCLING_VLLM
 vlm_opts.concurrency = BATCH_SIZE
 
 pipeline_options = VlmPipelineOptions(
