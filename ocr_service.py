@@ -20,7 +20,7 @@ def main() -> None:
     pipeline_options.do_ocr = True
 
     # Keep table structure ON, but prevent "everything becomes one cell"
-    pipeline_options.do_table_structure = True
+    pipeline_options.do_table_structure = False
     pipeline_options.table_structure_options.do_cell_matching = False
 
     ocr_options = TesseractCliOcrOptions(force_full_page_ocr=True)
