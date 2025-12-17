@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 from io import BytesIO
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -25,11 +26,11 @@ log = logging.getLogger("ocr-worker")
 # ------------------------------------------------------------------
 # FASTAPI APP
 # ------------------------------------------------------------------
-app = FastAPI(title="docling-ocr-worker", version="1.0.0")
+app = FastAPI(title="docling-ocr-worker", version="1.1.0")
 
 
 # ------------------------------------------------------------------
-# PERF SETTINGS
+# PERF SETTINGS (single / low-page documents)
 # ------------------------------------------------------------------
 PAGE_BATCH_SIZE = int(os.getenv("OCR_PAGE_BATCH_SIZE", "1"))
 settings.perf.page_batch_size = PAGE_BATCH_SIZE
@@ -37,7 +38,7 @@ settings.debug.profile_pipeline_timings = True
 
 
 # ------------------------------------------------------------------
-# DOC LING: PDF PIPELINE + TESSERACT CLI OCR (ENGLISH) + TABLES
+# DOC LING: PDF + TESSERACT CLI OCR (ENGLISH) + TABLE STRUCTURE
 # ------------------------------------------------------------------
 ocr_options = TesseractCliOcrOptions(lang=["eng"])
 
@@ -45,68 +46,50 @@ pipeline_options = PdfPipelineOptions(
     do_ocr=True,
     force_full_page_ocr=True,
     ocr_options=ocr_options,
-    do_table_structure=True,  # IMPORTANT for statements
+    do_table_structure=True,
 )
 
-# IMPORTANT for statements: improves table extraction quality
 pipeline_options.table_structure_options.do_cell_matching = True
 
 converter = DocumentConverter(
     format_options={
         InputFormat.PDF: PdfFormatOption(
-            pipeline_options=pipeline_options,
+            pipeline_options=pipeline_options
         )
     }
 )
 
 
 # ------------------------------------------------------------------
-# CONFIDENCE MODELS (DOC LING NATIVE REPORT SURFACE)
+# MODELS
 # ------------------------------------------------------------------
 class ConfidencePage(BaseModel):
-    # Component scores/grades (page-level)
     layout_score: Optional[float] = None
     layout_grade: Optional[str] = None
-
     ocr_score: Optional[float] = None
     ocr_grade: Optional[str] = None
-
     parse_score: Optional[float] = None
     parse_grade: Optional[str] = None
-
     table_score: Optional[float] = None
     table_grade: Optional[str] = None
-
-    # Summary (page-level) — if present in your Docling version
     mean_grade: Optional[str] = None
     low_grade: Optional[str] = None
 
 
-class ConfidenceReportOut(BaseModel):
-    # Component scores/grades (document-level)
+class ConfidenceReport(BaseModel):
     layout_score: Optional[float] = None
     layout_grade: Optional[str] = None
-
     ocr_score: Optional[float] = None
     ocr_grade: Optional[str] = None
-
     parse_score: Optional[float] = None
     parse_grade: Optional[str] = None
-
     table_score: Optional[float] = None
     table_grade: Optional[str] = None
-
-    # Summary grades (document-level)
     mean_grade: Optional[str] = None
     low_grade: Optional[str] = None
-
-    # Page-level breakdown
     pages: List[ConfidencePage] = []
 
 
-# ------------------------------------------------------------------
-# RESPONSE MODEL
-# ------------------------------------------------------------------
 class OcrResult(BaseModel):
     doc_id: str
     filename: str
@@ -114,13 +97,31 @@ class OcrResult(BaseModel):
     num_pages: int
     pipeline: str
     timings: Dict[str, Any]
-    confidence: Optional[ConfidenceReportOut] = None
+    confidence: Optional[ConfidenceReport]
     markdown: str
 
 
 # ------------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------------
+def safe_float(v: Optional[float]) -> Optional[float]:
+    if v is None:
+        return None
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return v
+
+
+def to_dict(obj) -> Optional[Dict[str, Any]]:
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "__dict__"):
+        return vars(obj)
+    return None
+
+
 def validate_pdf(file: UploadFile, data: bytes) -> None:
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
@@ -137,20 +138,10 @@ def make_doc_id(filename: str, data: bytes) -> str:
 
 
 def extract_timings(conv_result) -> Dict[str, Any]:
-    """
-    Keep timings useful for ops, but drop noisy legacy bits like doc_enrich.
-    """
     out: Dict[str, Any] = {}
-
-    if not (hasattr(conv_result, "timings") and isinstance(conv_result.timings, dict)):
-        return out
-
-    for k, v in conv_result.timings.items():
-        # You asked to remove "enrich"
-        if k == "doc_enrich":
-            continue
-
-        if hasattr(v, "times"):
+    timings = getattr(conv_result, "timings", None)
+    if isinstance(timings, dict):
+        for k, v in timings.items():
             t = getattr(v, "times", None)
             if isinstance(t, list) and t:
                 out[k] = {
@@ -159,58 +150,46 @@ def extract_timings(conv_result) -> Dict[str, Any]:
                     "median": sorted(t)[len(t) // 2],
                     "max": max(t),
                 }
-            else:
-                out[k] = str(v)
-        else:
-            out[k] = str(v)
-
     return out
 
 
-def _to_dict_maybe(obj: Any) -> Optional[Dict[str, Any]]:
-    """
-    Docling's confidence report is available at ConversionResult.confidence (v2.34.0+).
-    It may be a Pydantic model or a dataclass-like object.
-    """
-    if obj is None:
-        return None
-    if hasattr(obj, "model_dump"):
-        # Pydantic v2 style
-        return obj.model_dump()
-    if hasattr(obj, "dict"):
-        # Pydantic v1 style
-        return obj.dict()
-    if isinstance(obj, dict):
-        return obj
-    # best-effort fallback
-    try:
-        return dict(obj)  # type: ignore[arg-type]
-    except Exception:
-        return None
-
-
-def build_confidence_report(conv_result) -> Optional[ConfidenceReportOut]:
-    """
-    Normalize Docling's native confidence report into the fields you care about.
-    """
+def build_confidence_report(conv_result) -> Optional[ConfidenceReport]:
     conf = getattr(conv_result, "confidence", None)
-    conf_dict = _to_dict_maybe(conf)
+    conf_dict = to_dict(conf)
     if not conf_dict:
         return None
 
-    # Some versions nest pages under "pages" with same field names
     pages_out: List[ConfidencePage] = []
-    pages = conf_dict.get("pages") or []
-    if isinstance(pages, list):
-        for p in pages:
-            if not isinstance(p, dict):
-                p = _to_dict_maybe(p) or {}
-            pages_out.append(ConfidencePage(**(p or {})))
+    for p in conf_dict.get("pages", []) or []:
+        p = to_dict(p) or {}
+        pages_out.append(
+            ConfidencePage(
+                layout_score=safe_float(p.get("layout_score")),
+                layout_grade=p.get("layout_grade"),
+                ocr_score=safe_float(p.get("ocr_score")),
+                ocr_grade=p.get("ocr_grade"),
+                parse_score=safe_float(p.get("parse_score")),
+                parse_grade=p.get("parse_grade"),
+                table_score=safe_float(p.get("table_score")),
+                table_grade=p.get("table_grade"),
+                mean_grade=p.get("mean_grade"),
+                low_grade=p.get("low_grade"),
+            )
+        )
 
-    # Root has document-level fields equally named (per docs)
-    base = dict(conf_dict)
-    base["pages"] = pages_out
-    return ConfidenceReportOut(**base)
+    return ConfidenceReport(
+        layout_score=safe_float(conf_dict.get("layout_score")),
+        layout_grade=conf_dict.get("layout_grade"),
+        ocr_score=safe_float(conf_dict.get("ocr_score")),
+        ocr_grade=conf_dict.get("ocr_grade"),
+        parse_score=safe_float(conf_dict.get("parse_score")),
+        parse_grade=conf_dict.get("parse_grade"),
+        table_score=safe_float(conf_dict.get("table_score")),
+        table_grade=conf_dict.get("table_grade"),
+        mean_grade=conf_dict.get("mean_grade"),
+        low_grade=conf_dict.get("low_grade"),
+        pages=pages_out,
+    )
 
 
 # ------------------------------------------------------------------
@@ -221,12 +200,9 @@ def health():
     return {
         "ok": True,
         "pipeline": "docling_pdf_tesseract_cli_eng_tables",
-        "page_batch_size": PAGE_BATCH_SIZE,
         "ocr_lang": ["eng"],
-        "force_full_page_ocr": True,
-        "do_table_structure": True,
-        "do_cell_matching": True,
-        "confidence_scores": True,  # requires docling >= 2.34.0
+        "table_structure": True,
+        "confidence_scores": True,
     }
 
 
@@ -242,14 +218,11 @@ async def convert_ocr(file: UploadFile = File(...)):
 
     try:
         result = converter.convert(source=stream)
-
         doc = result.document
         if not doc:
             raise RuntimeError("Docling returned no document")
 
         markdown = doc.export_to_markdown()
-        if not (markdown or "").strip():
-            raise HTTPException(status_code=502, detail="OCR produced empty output")
 
         confidence = build_confidence_report(result)
 
@@ -279,8 +252,5 @@ async def convert_ocr(file: UploadFile = File(...)):
 if __name__ == "__main__":
     import uvicorn
 
-    log.info(
-        "Starting Docling OCR (Tesseract CLI, eng, tables) on port %s",
-        os.getenv("PORT", "8000"),
-    )
+    log.info("Starting Docling OCR (Tesseract CLI, eng, tables, confidence)")
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
