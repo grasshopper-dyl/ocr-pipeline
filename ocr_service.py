@@ -71,7 +71,7 @@ class OcrResult(BaseModel):
     pipeline: str
     timings: Dict[str, Any]
     markdown: str
-    text: str
+
 
 
 # ------------------------------------------------------------------
@@ -145,10 +145,9 @@ async def convert_ocr(file: UploadFile = File(...)):
             raise RuntimeError("Docling returned no document")
 
         markdown = doc.export_to_markdown()
-        text = doc.export_to_text() if hasattr(doc, "export_to_text") else markdown
+        
 
-        if not (text or "").strip():
-            raise HTTPException(status_code=502, detail="OCR produced empty output")
+        
 
         return OcrResult(
             doc_id=doc_id,
@@ -158,7 +157,6 @@ async def convert_ocr(file: UploadFile = File(...)):
             pipeline="docling_pdf_tesseract_cli_eng_tables",
             timings=extract_timings(result),
             markdown=markdown,
-            text=text,
         )
 
     except HTTPException:
