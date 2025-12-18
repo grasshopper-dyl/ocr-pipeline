@@ -16,4 +16,4 @@ COPY ocr_service.py .
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
-CMD ["python", "ocr_service.py"]
+CMD ["uvicorn", "ocr_service:app", "--host", "0.0.0.0", "--port", "8000"]
