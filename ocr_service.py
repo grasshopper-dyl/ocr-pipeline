@@ -1,3 +1,5 @@
+##stable version 1.0
+
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
