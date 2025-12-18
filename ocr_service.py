@@ -83,3 +83,7 @@ async def convert_ocr(file: UploadFile = File(...)):
 
     except Exception as e:
         raise HTTPException(500, f"OCR failure: {type(e).__name__}: {e}")
+
+
+if __name__ == "__main__":
+    main()
