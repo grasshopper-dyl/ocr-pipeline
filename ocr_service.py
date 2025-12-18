@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import statistics
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Dict, List, Optional
@@ -15,8 +17,11 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractCliO
 from docling.datamodel.settings import settings
 from docling.document_converter import DocumentConverter, PdfFormatOption
 
-
-
+try:
+    import docling  # type: ignore
+    DOCLING_VERSION = getattr(docling, "__version__", "unknown")
+except Exception:
+    DOCLING_VERSION = "unknown"
 
 
 # ------------------------------------------------------------------
@@ -29,7 +34,7 @@ log = logging.getLogger("ocr-worker")
 # ------------------------------------------------------------------
 # FASTAPI APP
 # ------------------------------------------------------------------
-app = FastAPI(title="docling-ocr-worker", version="1.2.1")
+app = FastAPI(title="docling-ocr-worker", version="1.2.0")
 
 
 # ------------------------------------------------------------------
@@ -47,6 +52,7 @@ pipeline_options = PdfPipelineOptions(
     do_table_structure=True,
 )
 
+# table tuning
 pipeline_options.table_structure_options.do_cell_matching = True
 
 converter = DocumentConverter(
@@ -59,6 +65,13 @@ converter = DocumentConverter(
 # ------------------------------------------------------------------
 # MODELS
 # ------------------------------------------------------------------
+class TimingStats(BaseModel):
+    count: int
+    min: float
+    median: float
+    max: float
+
+
 class ConfidencePage(BaseModel):
     layout_score: Optional[float] = None
     layout_grade: Optional[str] = None
@@ -98,16 +111,14 @@ class OcrMetadata(BaseModel):
     pipeline: str
     ocr_lang: List[str]
     table_structure: bool
+    docling_version: str
     perf_page_batch_size: int
-    # convenience fields (so downstream doesn't need to parse confidence)
-    mean_grade: Optional[str] = None
-    low_grade: Optional[str] = None
 
 
 class OcrResult(BaseModel):
     metadata: OcrMetadata
+    timings: Dict[str, TimingStats] = Field(default_factory=dict)
     confidence: Optional[ConfidenceReport] = None
-    confidence_raw: Optional[Dict[str, Any]] = None
     markdown: str
 
 
@@ -127,11 +138,27 @@ def sha256_hex(data: bytes) -> str:
 
 
 def make_doc_id(filename: str, data: bytes) -> str:
+    # stable short ID (same input => same doc_id)
     h = hashlib.sha256()
     h.update(filename.encode("utf-8", errors="ignore"))
     h.update(b"\n")
     h.update(data)
     return h.hexdigest()[:32]
+
+
+def _to_dict(obj: Any) -> Optional[Dict[str, Any]]:
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    if is_dataclass(obj):
+        return asdict(obj)
+    if hasattr(obj, "model_dump"):  # pydantic v2
+        return obj.model_dump()
+    if hasattr(obj, "__dict__"):
+        return vars(obj)
+    return None
+
 
 
 
@@ -143,8 +170,12 @@ def build_confidence_report(conv_result) -> Optional[ConfidenceReport]:
 
     pages_out: List[ConfidencePage] = []
     for p in (conf_dict.get("pages") or []):
+        pd = _to_dict(p) or {}
         pages_out.append(
             ConfidencePage(
+                layout_grade=pd.get("layout_grade"),
+                ocr_grade=pd.get("ocr_grade"),
+                parse_grade=pd.get("parse_grade"),
                 table_grade=pd.get("table_grade"),
                 mean_grade=pd.get("mean_grade"),
                 low_grade=pd.get("low_grade"),
@@ -152,6 +183,9 @@ def build_confidence_report(conv_result) -> Optional[ConfidenceReport]:
         )
 
     return ConfidenceReport(
+        layout_grade=conf_dict.get("layout_grade"),
+        ocr_grade=conf_dict.get("ocr_grade"),
+        parse_grade=conf_dict.get("parse_grade"),
         table_grade=conf_dict.get("table_grade"),
         mean_grade=conf_dict.get("mean_grade"),
         low_grade=conf_dict.get("low_grade"),
@@ -159,12 +193,17 @@ def build_confidence_report(conv_result) -> Optional[ConfidenceReport]:
     )
 
 
+# Optional quality gate using Docling grades
+GRADE_ORDER = {"POOR": 0, "FAIR": 1, "GOOD": 2, "EXCELLENT": 3}
+
+
 # ------------------------------------------------------------------
 # ROUTES
 # ------------------------------------------------------------------
 
 
-@app.post("/convert.ocr", response_model=OcrResult, response_model_exclude_none=True)
+
+@app.post("/convert.ocr", response_model=OcrResult)
 async def convert_ocr(file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     validate_pdf(file, pdf_bytes)
@@ -172,6 +211,7 @@ async def convert_ocr(file: UploadFile = File(...)):
     filename = file.filename or "upload.pdf"
     doc_id = make_doc_id(filename, pdf_bytes)
     digest = sha256_hex(pdf_bytes)
+
     received_at = datetime.now(timezone.utc).isoformat()
 
     stream = DocumentStream(name=filename, stream=BytesIO(pdf_bytes))
@@ -182,13 +222,12 @@ async def convert_ocr(file: UploadFile = File(...)):
         if not doc:
             raise RuntimeError("Docling returned no document")
 
-
+        # Prefer Docling's own page list when available
         pages = getattr(result, "pages", None) or getattr(doc, "pages", None) or []
         num_pages = len(pages)
 
         markdown = doc.export_to_markdown()
 
-        confidence_obj = getattr(result, "confidence", None)
         confidence = build_confidence_report(result)
 
         meta = OcrMetadata(
@@ -201,10 +240,7 @@ async def convert_ocr(file: UploadFile = File(...)):
             num_pages=num_pages,
             status=str(getattr(result, "status", "UNKNOWN")),
             pipeline=PIPELINE_NAME,
-            ocr_lang=[OCR_LANG],
             table_structure=True,
-            mean_grade=(confidence.mean_grade if confidence else None),
-            low_grade=(confidence.low_grade if confidence else None),
         )
 
         return OcrResult(
