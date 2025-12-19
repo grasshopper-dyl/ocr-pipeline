@@ -107,7 +107,7 @@ async def convert_ocr(file: UploadFile = File(...)):
         doc = result.document
 
         raw_md = doc.export_to_markdown()
-        md = clean_markdown(raw_md)
+        
 
         resp = OcrResponse(
             doc_id=make_doc_id(filename, pdf_bytes),
@@ -117,8 +117,8 @@ async def convert_ocr(file: UploadFile = File(...)):
             confidence=dump_jsonable(getattr(result, "confidence", None)),
             status=dump_jsonable(getattr(result, "status", None)),
             accelerator=ACCEL_LABEL,
-            markdown=md,
-        )
+            markdown=raw_md,
+            )
 
         # Guarantee JSON primitives
         return resp.model_dump(mode="json")
