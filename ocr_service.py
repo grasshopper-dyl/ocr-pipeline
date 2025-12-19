@@ -1,5 +1,3 @@
-##stable version 1.0
-
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
@@ -10,30 +8,30 @@ from typing import Any, Optional
 
 from docling.datamodel.base_models import DocumentStream, InputFormat
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
-from docling.datamodel.pipeline_options import ThreadedPdfPipelineOptions, TesseractCliOcrOptions
+from docling.datamodel.pipeline_options import (
+    ThreadedPdfPipelineOptions,
+    TesseractCliOcrOptions,
+)
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.pipeline.threaded_standard_pdf_pipeline import ThreadedStandardPdfPipeline
 
 
-app = FastAPI(title="docling-ocr-worker", version="0.4.0")
+app = FastAPI(title="docling-ocr-worker", version="1.0.1")
 
 
 class OcrResponse(BaseModel):
-    # makes Pydantic accept non-primitive types and coerce when we dump
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     doc_id: str
     filename: str
     sha256: str
     received_at: str
-
     markdown: str
 
-    # keep these optional + JSON-safe
     confidence: Optional[Any] = None
     status: Optional[Any] = None
 
-    # optional debugging metadata
+    # debugging metadata
     accelerator: Optional[str] = None
 
 
@@ -61,17 +59,30 @@ def dump_jsonable(x: Any) -> Any:
     return TypeAdapter(Any).dump_python(x, mode="json")
 
 
-# --- Explicit CUDA + threaded pipeline (this is "where the accelerator is") ---
+# ------------------------------------------------------------------
+# Docling OCR pipeline (GPU assumed present)
+# ------------------------------------------------------------------
+ACCEL_DEVICE = AcceleratorDevice.CUDA  # you said the server will always have a GPU
+ACCEL_LABEL = "cuda:0"
+
 pipeline_options = ThreadedPdfPipelineOptions(
-    accelerator_options=AcceleratorOptions(device=AcceleratorDevice.CUDA),
+    accelerator_options=AcceleratorOptions(device=ACCEL_DEVICE),
     ocr_batch_size=4,
     layout_batch_size=64,
     table_batch_size=4,
 )
+
+# OCR + tables (your stable behavior)
 pipeline_options.do_ocr = True
 pipeline_options.do_table_structure = True
 pipeline_options.table_structure_options.do_cell_matching = True
-pipeline_options.ocr_options = TesseractCliOcrOptions(force_full_page_ocr=True)
+
+# IMPORTANT: pin language for bank statements (reduces variance + improves speed)
+# If your installed Docling version does not accept `lang`, remove that argument.
+pipeline_options.ocr_options = TesseractCliOcrOptions(
+    force_full_page_ocr=True,
+    lang=["eng"],
+)
 
 converter = DocumentConverter(
     format_options={
@@ -107,10 +118,10 @@ async def convert_ocr(file: UploadFile = File(...)):
             markdown=doc.export_to_markdown(),
             confidence=dump_jsonable(getattr(result, "confidence", None)),
             status=dump_jsonable(getattr(result, "status", None)),
-            accelerator="cuda"  # you can set this dynamically if you want
+            accelerator=ACCEL_LABEL,
         )
 
-        # return model_dump(mode="json") to guarantee JSON primitives
+        # JSON primitives guaranteed
         return resp.model_dump(mode="json")
 
     except Exception as e:
