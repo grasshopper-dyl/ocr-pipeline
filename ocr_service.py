@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Optional
@@ -55,26 +54,6 @@ def dump_jsonable(x: Any) -> Any:
     return TypeAdapter(Any).dump_python(x, mode="json")
 
 
-def clean_markdown(md: str) -> str:
-    # Remove docling image markers
-    md = md.replace("<!-- image -->\n\n", "")
-
-    # Normalize common “smart” punctuation to ASCII
-    md = (
-        md.replace("“", '"')
-        .replace("”", '"')
-        .replace("’", "'")
-        .replace("—", "-")
-        .replace("–", "-")
-    )
-
-    # Clean up whitespace noise but keep structure
-    md = re.sub(r"[ \t]+\n", "\n", md)   # trailing whitespace
-    md = re.sub(r"\n{3,}", "\n\n", md)   # collapse excessive blank lines
-    md = re.sub(r"[ \t]{2,}", " ", md)   # collapse repeated spaces
-
-    return md.strip()
-
 
 # ------------------------------------------------------------------
 # Docling pipeline (GPU assumed present)
@@ -93,11 +72,6 @@ pipeline_options.do_ocr = True
 pipeline_options.do_table_structure = True
 pipeline_options.table_structure_options.do_cell_matching = True
 
-# ------------------------------------------------------
-# OCR: ENGLISH ONLY (prevents fra+deu+spa+eng behavior)
-# ------------------------------------------------------
-# NOTE: If your installed docling version does not accept `lang`,
-# remove it and paste the error; I'll match it to your version.
 pipeline_options.ocr_options = TesseractCliOcrOptions(
     force_full_page_ocr=True,
     lang=["eng"],
@@ -140,10 +114,10 @@ async def convert_ocr(file: UploadFile = File(...)):
             filename=filename,
             sha256=sha256_hex(pdf_bytes),
             received_at=datetime.now(timezone.utc).isoformat(),
-            markdown=md,
             confidence=dump_jsonable(getattr(result, "confidence", None)),
             status=dump_jsonable(getattr(result, "status", None)),
             accelerator=ACCEL_LABEL,
+            markdown=md,
         )
 
         # Guarantee JSON primitives
